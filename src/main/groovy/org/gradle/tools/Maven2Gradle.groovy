@@ -49,13 +49,18 @@ class Maven2Gradle {
     if (multimodule) {
       println "This is multi-module project.\n"
       def allProjects = effectivePom.project
+      // Identify parent pom by finding the parent not part of the list of project
+      def parentProject = allProjects.find { pp -> null == allProjects.find { pc -> pp != pc }}
+      if (parentProject == null) {
+          throw new RuntimeException("Did not find any parent project from the list of projects ${allProjects}")
+      }
       print "Generating settings.gradle... "
-      qualifiedNames = generateSettings(workingDir.getName(), allProjects[0].artifactId, allProjects);
+      qualifiedNames = generateSettings(workingDir.getName(), parentProject, allProjects);
       println "Done."
       print "Configuring Dependencies... "
       def dependencies = [:];
       allProjects.each { project ->
-        dependencies[project.artifactId.text()] = getDependencies(project, allProjects)
+        dependencies[project.artifactId.text()] = getDependencies(project, allProjects, parentProject)
       }
       println "Done."
 
@@ -180,7 +185,7 @@ ${globalExclusions(effectivePom)}
         build += packageTests;
       }
       print "Generating settings.gradle if needed... "
-      generateSettings(workingDir.getName(), effectivePom.artifactId, null);
+      generateSettings(workingDir.getName(), effectivePom, null);
       println "Done."
 
     }
@@ -228,20 +233,20 @@ ${globalExclusions(effectivePom)}
     }
   }
 
-  def fqn = {project, allProjects ->
+  def fqn = {project, allProjects, parentProject ->
     def buffer = new StringBuilder()
-    generateFqn(project, allProjects, buffer)
+    generateFqn(project, allProjects, buffer, parentProject)
     return buffer.toString()
   }
 
-  private generateFqn(def project, def allProjects, StringBuilder buffer) {
+  private generateFqn(def project, def allProjects, StringBuilder buffer, def parentProject) {
     def artifactId = project.artifactId.text()
     buffer.insert(0, ":${artifactId}")
     //we don't need the top-level parent in gradle, so we stop on it
-    if (project.parent.artifactId.text() != allProjects[0].artifactId.text()) {
+    if (project.parent.artifactId.text() != parentProject.artifactId.text()) {
       generateFqn(allProjects.find {fullProject ->
         fullProject.artifactId.text() == project.parent.artifactId.text()
-      }, allProjects, buffer)
+      }, allProjects, buffer, parentProject)
     }
   }
 
@@ -290,7 +295,7 @@ ${globalExclusions(effectivePom)}
     //No need to include plugin repos - who cares about maven plugins?
   }
 
-  private String getDependencies(project, allProjects) {
+  private String getDependencies(project, allProjects, parentProject) {
 // use GPath to navigate the object hierarchy and retrieve the collection of dependency nodes.
     def dependencies = project.dependencies.dependency
     def war = project.packaging == "war"
@@ -337,7 +342,7 @@ ${globalExclusions(effectivePom)}
         return prj.artifactId.text() == mavenDependency.artifactId.text() && prj.groupId.text() == mavenDependency.groupId.text()
       }
       if (projectDep) {
-        createProjectDependency(projectDep, sb, scope, allProjects)
+        createProjectDependency(projectDep, sb, scope, allProjects, parentProject)
       } else {
         def dependencyProperties = null;
         if (!war && scope == 'providedCompile') {
@@ -459,9 +464,10 @@ artifacts.archives packageTests
     return new File(project.build.directory.text()).parentFile
   }
 
-  private def generateSettings(def dirName, def mvnProjectName, def projects) {
+  private def generateSettings(def dirName, def parentProject, def projects) {
     def qualifiedNames = [:]
-    def projectName = "";
+    def projectName = ""
+    def mvnProjectName = parentProject.artifactId
     if (dirName != mvnProjectName) {
       projectName = """rootProject.name = '${mvnProjectName}'
 """
@@ -472,7 +478,7 @@ artifacts.archives packageTests
     def artifactIdToDir = [:]
     if (projects) {
       modulePoms.each { project ->
-        def fqn = fqn(project, projects)
+        def fqn = fqn(project, projects, parentProject)
         artifactIdToDir[fqn] = workingDir.toURI().relativize(projectDir(project).toURI()).path
         modules.append("'${fqn}', ")
       }
@@ -505,7 +511,7 @@ project('$entry.key').projectDir = """ + '"$rootDir/' + "${entry.value}" + '" as
             errorproperty: "cmdErr",
             failonerror: "true",
             executable: ((String) System.properties['os.name']).toLowerCase().contains("win") ? "mvn.bat" : "mvn") {
-      arg(line: """-Doutput=${fileName} org.apache.maven.plugins:maven-help-plugin:2.2-SNAPSHOT:effective-$file""")
+      arg(line: """-Doutput=${fileName} org.apache.maven.plugins:maven-help-plugin:2.1.1:effective-$file""")
       env(key: "JAVA_HOME", value: System.getProperty("java.home"))
     }
 
@@ -549,11 +555,11 @@ project('$entry.key').projectDir = """ + '"$rootDir/' + "${entry.value}" + '" as
 /**
  * Print out the basic form of gradle dependency
  */
-  private def createProjectDependency(projectDep, build, String scope, allProjects) {
+  private def createProjectDependency(projectDep, build, String scope, allProjects, parentProject) {
     if (projectDep.packaging.text() == 'war') {
       dependentWars += projectDep
     }
-    build.append("${scope} project('${fqn(projectDep, allProjects)}')\n")
+    build.append("${scope} project('${fqn(projectDep, allProjects, parentProject)}')\n")
   }
 
 /**
